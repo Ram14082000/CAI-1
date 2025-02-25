@@ -3,6 +3,7 @@ import io
 import os
 from google.cloud import speech
 from google.cloud import texttospeech_v1
+from google.cloud import language_v1
 from flask import Flask, flash, render_template, request, redirect, url_for, send_file, send_from_directory
 #from werkzeug.utils import secure_filename
 
@@ -124,6 +125,20 @@ def sample_synthesize_speech(text=None, ssml=None, output_filename="output.wav")
         print(f"Error during synthesis: {e}")
         return None
 
+language_client = language_v1.LanguageServiceClient()
+
+def analyze_sentiment(text):
+    document = language_v1.Document(content=text, type_=language_v1.Document.Type.PLAIN_TEXT)
+    response = language_client.analyze_sentiment(request={"document": document})
+    sentiment_score = response.document_sentiment.score
+
+    if sentiment_score > 0.2:
+        return "positive"
+    elif sentiment_score < -0.2:
+        return "negative"
+    else:
+        return "neutral"
+
 @app.route('/upload', methods=['POST'])
 def upload_audio():
     if 'audio_data' not in request.files:
@@ -155,11 +170,21 @@ def upload_audio():
         # Call the Speech-to-Text function
         transcript = sample_recognize(content)
 
+        sentiment = analyze_sentiment(transcript)
+
         # Save the transcript as a .txt file
         transcript_filename = timestamped_filename.replace('.wav', '.txt')
         transcript_path = os.path.join(app.config['UPLOAD_FOLDER'], transcript_filename)
+
+        sentiment_filename = transcript_filename.replace('.txt', '_sentiment.txt')
+        sentiment_path=os.path.join(app.config['UPLOAD_FOLDER'], sentiment_filename)
+
         with open(transcript_path, 'w') as transcript_file:
             transcript_file.write(transcript)
+
+        with open(sentiment_path, 'w') as sentiment_file:
+            sentiment_file.write(sentiment)
+
 
         flash(f"Transcription successful! Transcript saved as: {transcript_filename}")
     except Exception as e:
@@ -178,14 +203,29 @@ def upload_text():
 
     # Define the output file path
     #os.makedirs(app.config['TTS_FOLDER'], exist_ok=True)
+    text_filename = datetime.now().strftime("%Y%m%d-%I%M%S%p") + '.txt'
+
     output_filename = datetime.now().strftime("%Y%m%d-%I%M%S%p") + '.wav'
+
+    sentiment_filename = datetime.now().strftime("%Y%m%d-%I%M%S%p") + '_sentiment.txt'
+
     output_filepath = os.path.join(app.config['TTS_FOLDER'], output_filename)
+    text_filepath = os.path.join(app.config['TTS_FOLDER'], text_filename)
+    sentiment_filepath = os.path.join(app.config['TTS_FOLDER'], sentiment_filename)
 
     # Use the sample_synthesize_speech function
     try:
+        with open(text_filepath, 'w') as text_file:
+            text_file.write(text)
+
+        sentiment = analyze_sentiment(text)
+
+        with open(sentiment_filepath, 'w') as sentiment_file:
+            sentiment_file.write(sentiment)
+        
         audio_content = sample_synthesize_speech(text=text, output_filename=output_filepath)
         if audio_content:
-            flash(f"Audio file created: {output_filename}")
+            flash(f"Audio file created: {output_filename}, Text file created: {text_filename}")
         else:
             flash("Error occurred during audio synthesis.")
     except Exception as e:
@@ -212,4 +252,4 @@ def scripts_js():
     return send_file('./script.js')
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(host='0.0.0.0', port=80)
