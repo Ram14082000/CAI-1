@@ -41,32 +41,6 @@
                 <script src="script.js"></script>
 
             </td>
-            <td style="width:50%">
-                <h2>Type in your text to generate audio</h2>
-
-                <form action="/upload_text" method="post">
-                  <textarea name="text" rows="10" cols="50"></textarea>
-                  <br>
-                  <input type="submit" value="Upload">
-                </form>
-                <h1>Text-to-Speech Files</h1>
-                <ul>
-                    {% for file in tts_files %}
-                    <li>
-                        <audio controls>
-                            <source src="{{ url_for('serve_tts_file', filename=file) }}">
-                            Your browser does not support the audio element.
-                        </audio><br>
-                        <a href="/tts/{{ file }}">{{ file }}</a>
-                        <a href="../tts/{{file.replace('.wav', '.txt')}}">{{ file.replace('.wav', '.txt') }}</a>
-                        <!-- Display Sentiment Analysis -->
-                            <strong>Sentiment Analysis:</strong>
-                            <a href="../tts/{{file.replace('.wav', '_sentiment.txt')}}">{{ file.replace('.wav', '_sentiment.txt') }}</a>
-                            <br>
-                    </li>
-                    {% endfor %}
-                    </ul>
-            </td>
         </tr>
     </table>
 </body>
