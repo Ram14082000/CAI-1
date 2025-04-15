@@ -1,132 +1,129 @@
-from datetime import datetime
-import io
 import os
+import io
 import base64
-from flask import Flask, flash, render_template, request, redirect, send_file, send_from_directory
+from datetime import datetime
+import re
+from flask import Flask, flash, render_template, request, redirect, send_file, send_from_directory, session
+from PyPDF2 import PdfReader
+from gtts import gTTS
 import google.generativeai as geai
 
 app = Flask(__name__)
-
-# Secret key for session management
 app.secret_key = 'SpeechProject'
 
-# Folder for storing uploaded audio files
 UPLOAD_FOLDER = 'uploads'
-ALLOWED_EXTENSIONS = {'wav'}
+ALLOWED_EXTENSIONS = {'wav', 'pdf'}
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # Max file size set to 16 MB
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 
-# Ensure upload folder exists
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
+# Gemini setup
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 # Configure Generative AI API Key
-geai.configure(api_key=GEMINI_API_KEY)  # Replace with your actual API key
+geai.configure(api_key=GEMINI_API_KEY)
 
-# Function to check if file type is allowed
+# --- Helpers ---
+def extract_pdf_text(file_path):
+    reader = PdfReader(file_path)
+    return "\n".join(page.extract_text() or "" for page in reader.pages)
+
+def clean_text(text):
+    return re.sub(r'[*_`]+', '', text).strip()
+
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-# Get all uploaded files
-def get_files():
-    return sorted([f for f in os.listdir(UPLOAD_FOLDER) if allowed_file(f)], reverse=True)
+def generate_tts(text, output_path):
+    tts = gTTS(text=text)
+    tts.save(output_path)
 
+
+# --- Routes ---
 @app.route('/')
 def index():
-    return render_template('index.html', files=get_files())
+    return render_template('index.html')
 
-# Function to process audio using Gemini AI
-def analyze_audio_with_llm(audio_content):
+@app.route('/book', methods=['POST'])
+def handle_book_question():
+    pdf_file = request.files.get("pdf_file")
+    audio_data = request.form.get("audio_data")
+
+    if not pdf_file or not audio_data:
+        flash("Both PDF and audio question are required.")
+        return redirect('/')
+
+    # Save PDF and audio
+    timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+    pdf_filename = f"book-{timestamp}.pdf"
+    audio_filename = f"question-{timestamp}.wav"
+    response_filename = f"response-{timestamp}.txt"
+    tts_filename = f"tts-{timestamp}.wav"
+
+    pdf_path = os.path.join(UPLOAD_FOLDER, pdf_filename)
+    audio_path = os.path.join(UPLOAD_FOLDER, audio_filename)
+    response_path = os.path.join(UPLOAD_FOLDER, response_filename)
+    tts_path = os.path.join(UPLOAD_FOLDER, tts_filename)
+
+    pdf_file.save(pdf_path)
+    with open(audio_path, "wb") as f:
+        f.write(base64.b64decode(audio_data))
+
+    # Extract book text
+    book_text = extract_pdf_text(pdf_path)[:5000]  # Truncate if needed
+    encoded_audio = base64.b64encode(open(audio_path, "rb").read()).decode("utf-8")
+
+    # Gemini prompt
+    prompt = f"""
+You are a helpful assistant with access to the following book:
+
+{book_text}
+
+1. Transcribe the user’s audio question.
+2. Answer the question based only on the content of the book.
+3. If you cannot find the answer in the book, say "This information is not in the book."
+
+Please format as:
+Transcription: ...
+Answer: ...
+"""
+
     model = geai.GenerativeModel("gemini-1.5-pro")
-
-    # Convert audio to Base64 string
-    encoded_audio = base64.b64encode(audio_content).decode("utf-8")
-
-    # Send to Gemini API for processing
-    prompt = """
-    You are an AI that transcribes speech and analyzes sentiment.
-    - First, transcribe the given audio into text.
-    - Then, provide only the sentiment analysis summary (positive, negative, or neutral).
-    
-    Format the response as:
-    Transcription: <transcribed text>
-    Sentiment: <sentiment result>
-    """
-
     response = model.generate_content([
         prompt,
         {"mime_type": "audio/wav", "data": encoded_audio}
     ])
 
-    # Extract response text
-    result_text = response.text.strip() if response and response.text else "Error processing transcription"
+    response_text = response.text.strip()
+    transcript, answer = "N/A", "Could not generate response."
 
-    # Extract transcription and sentiment properly
-    transcript = "No transcription available."
-    sentiment = "No sentiment analysis available."
+    if "Answer:" in response_text:
+        parts = response_text.split("Answer:")
+        transcript = clean_text(parts[0].replace("Transcription:", "").strip())
+        answer = clean_text(parts[1])
+    else:
+        answer = response_text.strip()
 
-    if "Transcription:" in result_text and "Sentiment:" in result_text:
-        try:
-            parts = result_text.split("Sentiment:")
-            transcript = parts[0].replace("Transcription:", "").strip()
-            sentiment = parts[1].strip()
-        except IndexError:
-            pass
+    # Save response and generate TTS
+    with open(response_path, "w") as f:
+        f.write(f"Transcription: {transcript}\nAnswer: {answer}")
 
-    return transcript, sentiment
+    generate_tts(answer, tts_path)
 
-@app.route('/upload', methods=['POST'])
-def upload_audio():
-    if 'audio_data' not in request.files:
-        flash('No audio file provided.')
-        return redirect('/')
-
-    file = request.files['audio_data']
-    if file.filename == '':
-        flash('No selected file.')
-        return redirect('/')
-
-    if not allowed_file(file.filename):
-        flash('Invalid file type. Only .wav files are allowed.')
-        return redirect('/')
-
-    # Save file with timestamped name
-    timestamped_filename = datetime.now().strftime("%Y%m%d-%I%M%S%p") + '.wav'
-    file_path = os.path.join(app.config['UPLOAD_FOLDER'], timestamped_filename)
-    file.save(file_path)
-
-    try:
-        # Read audio file
-        with io.open(file_path, 'rb') as audio_file:
-            content = audio_file.read()
-
-        # Get transcription and sentiment
-        transcript, sentiment = analyze_audio_with_llm(content)
-
-        # Save transcript and sentiment to separate files
-        transcript_filename = timestamped_filename.replace('.wav', '.txt')
-        sentiment_filename = timestamped_filename.replace('.wav', '_sentiment.txt')
-
-        with open(os.path.join(app.config['UPLOAD_FOLDER'], transcript_filename), 'w') as f:
-            f.write(transcript)
-
-        with open(os.path.join(app.config['UPLOAD_FOLDER'], sentiment_filename), 'w') as f:
-            f.write(sentiment)
-
-        flash(f"Transcription and Sentiment analysis successful! Files saved as: {transcript_filename} & {sentiment_filename}")
-    except Exception as e:
-        flash(f"Error during processing: {e}")
-        return redirect('/')
+    # Store in session
+    session["transcript"] = transcript
+    session["answer"] = answer
+    session["tts_audio"] = tts_filename
 
     return redirect('/')
 
+@app.route('/tts/<filename>')
+def serve_tts(filename):
+    return send_from_directory(UPLOAD_FOLDER, filename)
+
 @app.route('/uploads/<filename>')
 def uploaded_file(filename):
-    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
-
-@app.route('/script.js', methods=['GET'])
-def scripts_js():
-    return send_file('./script.js')
+    return send_from_directory(UPLOAD_FOLDER, filename)
 
 if __name__ == '__main__':
     app.run(debug=True)
